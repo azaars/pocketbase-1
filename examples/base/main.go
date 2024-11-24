@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
@@ -18,6 +19,7 @@ import (
 	"github.com/pocketbase/pocketbase/plugins/jsvm"
 	"github.com/pocketbase/pocketbase/plugins/migratecmd"
 	"github.com/pocketbase/pocketbase/tools/hook"
+	"github.com/pocketbase/pocketbase/tools/security"
 )
 
 func main() {
@@ -121,6 +123,69 @@ func main() {
 	})
 
 	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
+		se.Router.POST("/api/collections/users/send-tac", func(re *core.RequestEvent) error {
+			data := struct {
+				Phone string `json:"phone" form:"phone"`
+			}{}
+			if err := re.BindBody(&data); err != nil {
+				return apis.NewBadRequestError("Failed to read request data", err)
+			}
+			record, err := app.FindFirstRecordByData("users", "phone", data.Phone)
+			if err != nil {
+				return apis.NewBadRequestError("Invalid phone number", err)
+			}
+
+			tac := security.RandomStringWithAlphabet(6, "1234567890")
+			payload := map[string]interface{}{
+				"msisdn": data.Phone,
+				"tac":    tac,
+			}
+			response, err := sendTAC(payload)
+			if err != nil || response == nil {
+				return apis.NewInternalServerError("Error posting to API: %v", err)
+			}
+
+			if response["code"] == 404 {
+				if record != nil { // no longer a subscriber
+					app.DB().Delete("users", dbx.HashExp{"id": record.Id}).Execute()
+				}
+				return apis.NewBadRequestError("Invalid phone number", err)
+			} else if response["code"] == 200 {
+				if record == nil {
+					password := security.RandomString(10)
+					params := map[string]any{
+						"password":        password,
+						"passwordConfirm": password,
+						// "email": "test@example.com",
+						"emailVisibility": true,
+						"verified":        false,
+						"username":        data.Phone,
+						// "name": "test",
+						"phone": data.Phone,
+						"tac":   tac,
+					}
+					if dealer, exists := response["dealer"]; exists {
+						params["dealer"] = dealer
+					}
+					app.DB().Insert("users", params).Execute()
+				} else {
+					params := map[string]any{
+						"tac": tac,
+					}
+					if dealer, exists := response["dealer"]; exists {
+						params["dealer"] = dealer
+					}
+					app.DB().Update("users", params, dbx.HashExp{"id": record.Id}).Execute()
+				}
+			}
+
+			return nil
+		})
+
+		return se.Next()
+	})
+
+	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
 		se.Router.POST("/api/collections/users/phone-login", func(re *core.RequestEvent) error {
 			data := struct {
 				Phone    string `json:"phone" form:"phone"`
@@ -132,17 +197,6 @@ func main() {
 			record, err := app.FindFirstRecordByData("users", "phone", data.Phone)
 			if err != nil || !record.ValidatePassword(data.Password) {
 				return apis.NewBadRequestError("Invalid credentials", err)
-			}
-			payload := map[string]interface{}{
-				"msisdn": data.Phone,
-			}
-			response, err := sendTAC(payload)
-			if err != nil {
-				return apis.NewInternalServerError("Error posting to API: %v", err)
-			}
-
-			if dealer, exists := response["dealer"]; exists {
-				fmt.Printf("msisdn: %v\n", dealer)
 			}
 
 			return apis.RecordAuthResponse(re, record, "", nil)
@@ -168,7 +222,7 @@ func defaultPublicDir() string {
 
 // postAPI makes a POST request to the specified URL with a JSON payload and returns the response body as a string.
 func sendTAC(payload map[string]interface{}) (map[string]interface{}, error) {
-	url := "https://rest.onexox.my/sendVerificationCode"
+	url := "https://rest.onexox.my/sendTAC"
 
 	// Marshal the payload to JSON
 	jsonData, err := json.Marshal(payload)
