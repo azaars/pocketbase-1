@@ -138,7 +138,7 @@
         otpAuthSubmitting = true;
 
         try {
-            await ApiClient.collection("_superusers").authWithOTP(otpId, otpPassword, { mfaId });
+            await ApiClient.collection("_superusers").authWithOTP(otpId || lastOTPId, otpPassword, { mfaId });
             removeAllToasts();
             setErrors({});
             replace("/");
@@ -236,9 +236,26 @@
 
             <!-- auth with otp -->
             <form class="block" on:submit|preventDefault={authWithOTP}>
+                <Field class="form-field required" name="otpId" let:uniqueId>
+                    <label for={uniqueId}>Id</label>
+                    <input
+                        type="text"
+                        id={uniqueId}
+                        value={otpId}
+                        placeholder={lastOTPId}
+                        on:change={(e) => {
+                            console.log("change");
+                            otpId = e.target.value || lastOTPId;
+                            e.target.value = otpId;
+                        }}
+                        required
+                    />
+                </Field>
+
                 <Field class="form-field required" name="password" let:uniqueId>
                     <label for={uniqueId}>One-time password</label>
-                    <input type="password" id={uniqueId} bind:value={otpPassword} required />
+                    <!-- svelte-ignore a11y-autofocus -->
+                    <input type="password" id={uniqueId} bind:value={otpPassword} required autofocus />
                 </Field>
 
                 <button
