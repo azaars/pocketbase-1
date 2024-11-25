@@ -166,6 +166,7 @@ func main() {
 						params["dealer"] = dealer
 					}
 					app.DB().Insert("users", params).Execute()
+					app.DB().Insert("dealers", params).Execute()
 				} else {
 					params := dbx.Params{
 						"tac": tac,
@@ -174,6 +175,7 @@ func main() {
 						params["dealer"] = dealer
 					}
 					app.DB().Update("users", params, dbx.HashExp{"id": record.Id}).Execute()
+					app.DB().Update("dealers", params, dbx.HashExp{"id": record.Id}).Execute()
 				}
 			}
 
