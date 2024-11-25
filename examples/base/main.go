@@ -1,17 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
@@ -19,7 +14,6 @@ import (
 	"github.com/pocketbase/pocketbase/plugins/jsvm"
 	"github.com/pocketbase/pocketbase/plugins/migratecmd"
 	"github.com/pocketbase/pocketbase/tools/hook"
-	"github.com/pocketbase/pocketbase/tools/security"
 )
 
 func main() {
@@ -122,87 +116,6 @@ func main() {
 		Priority: 999, // execute as latest as possible to allow users to provide their own route
 	})
 
-	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
-		se.Router.POST("/api/collections/users/send-tac", func(re *core.RequestEvent) error {
-			data := struct {
-				Phone string `json:"phone" form:"phone"`
-			}{}
-			if err := re.BindBody(&data); err != nil {
-				return apis.NewBadRequestError("Failed to read request data", err)
-			}
-			record, err := app.FindFirstRecordByData("users", "phone", data.Phone)
-			if err != nil {
-				return apis.NewBadRequestError("Invalid phone number", err)
-			}
-
-			tac := security.RandomStringWithAlphabet(6, "1234567890")
-			payload := map[string]interface{}{
-				"msisdn": data.Phone,
-				"tac":    tac,
-			}
-			response, err := sendTAC(payload)
-			if err != nil || response == nil {
-				return apis.NewInternalServerError("Error posting to API: %v", err)
-			}
-
-			if response["code"] == 404 {
-				if record != nil { // no longer a subscriber
-					app.DB().Update("users", dbx.Params{"status": "Terminated"}, dbx.HashExp{"id": record.Id}).Execute()
-				}
-				return apis.NewBadRequestError("Invalid phone number", err)
-			} else if response["code"] == 200 {
-				if record == nil {
-					password := security.RandomString(10)
-					params := dbx.Params{
-						"password":        password,
-						"passwordConfirm": password,
-						"emailVisibility": true,
-						"verified":        false,
-						"username":        data.Phone,
-						"phone":           data.Phone,
-						"tac":             tac,
-					}
-					if dealer, exists := response["dealer"]; exists {
-						params["dealer"] = dealer
-					}
-					app.DB().Insert("users", params).Execute()
-				} else {
-					params := dbx.Params{
-						"tac": tac,
-					}
-					if dealer, exists := response["dealer"]; exists {
-						params["dealer"] = dealer
-					}
-					app.DB().Update("users", params, dbx.HashExp{"id": record.Id}).Execute()
-				}
-			}
-
-			return nil
-		})
-
-		return se.Next()
-	})
-
-	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
-		se.Router.POST("/api/collections/users/phone-login", func(re *core.RequestEvent) error {
-			data := struct {
-				Phone    string `json:"phone" form:"phone"`
-				Password string `json:"password" form:"password"`
-			}{}
-			if err := re.BindBody(&data); err != nil {
-				return apis.NewBadRequestError("Failed to read request data", err)
-			}
-			record, err := app.FindFirstRecordByData("users", "phone", data.Phone)
-			if err != nil || !record.ValidatePassword(data.Password) {
-				return apis.NewBadRequestError("Invalid credentials", err)
-			}
-
-			return apis.RecordAuthResponse(re, record, "", nil)
-		})
-
-		return se.Next()
-	})
-
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -216,55 +129,4 @@ func defaultPublicDir() string {
 	}
 
 	return filepath.Join(os.Args[0], "../pb_public")
-}
-
-// postAPI makes a POST request to the specified URL with a JSON payload and returns the response body as a string.
-func sendTAC(payload map[string]interface{}) (map[string]interface{}, error) {
-	url := "https://rest.onexox.my/sendTAC"
-
-	// Marshal the payload to JSON
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal JSON: %w", err)
-	}
-
-	// Create a new HTTP client
-	client := &http.Client{}
-
-	// Create a new HTTP POST request
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers for the request
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Go-Client")
-
-	// Perform the HTTP request
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check for non-200 status codes
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("received non-200 status code: %d", resp.StatusCode)
-	}
-
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	// Unmarshal the response JSON into a map
-	var responseMap map[string]interface{}
-	err = json.Unmarshal(body, &responseMap)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response JSON: %w", err)
-	}
-
-	return responseMap, nil
 }
