@@ -142,43 +142,52 @@ func main() {
 				"msisdn": data.Phone,
 				"tac":    tac,
 			}
-			response, err := sendTAC(payload)
-			if err != nil || response == nil {
-				return apis.NewInternalServerError("Error posting to API: %v", err)
+			response, httpCode, err := sendTAC(payload)
+			if err != nil {
+				return apis.NewInternalServerError(err.Error(), err)
 			}
 
-			if response["code"] == 404 {
+			if httpCode == 404 {
 				if record != nil { // no longer a subscriber
 					app.DB().Update("users", dbx.Params{"status": "Terminated"}, dbx.HashExp{"id": record.Id}).Execute()
 					app.DB().Update("dealers", dbx.Params{"status": "Terminated"}, dbx.HashExp{"id": record.Id}).Execute()
 				}
 				return apis.NewBadRequestError("Invalid phone number", err)
-			} else if response["code"] == 200 {
+			} else if httpCode == 200 {
 				if record == nil {
-					password := security.RandomString(10)
+					password := security.RandomString(30)
+					token, tokenErr := record.NewAuthToken()
+					if tokenErr != nil {
+						return apis.NewInternalServerError("Failed to create auth token.", tokenErr)
+					}
 					params := dbx.Params{
 						"password":        password,
-						"passwordConfirm": password,
 						"emailVisibility": true,
 						"verified":        false,
 						"username":        data.Phone,
 						"phone":           data.Phone,
 						"tac":             tac,
+						"tokenKey":        token,
 					}
-					result, err := app.DB().Insert("users", params).Execute()
-					if err != nil || result == nil {
-						return apis.NewInternalServerError("Failed to create new user: %v", err)
+					_, err := app.DB().Insert("users", params).Execute()
+					if err != nil {
+						return apis.NewInternalServerError("Failed to create new user", err)
+						// return apis.NewInternalServerError(err.Error(), err)
 					}
 
 					if dealer, exists := response["dealer"]; exists {
-						newId, _ := result.LastInsertId()
-						params = dbx.Params{
-							"id":     newId,
+						record, err := app.FindFirstRecordByData("users", "phone", data.Phone)
+						if err != nil {
+							return apis.NewInternalServerError("Failed to create dealer: %v", err)
+						}
+
+						params := dbx.Params{
+							"userid": record.Id,
 							"dealer": dealer,
 						}
-						_, err := app.DB().Insert("dealers", params).Execute()
-						if err != nil {
-							return apis.NewInternalServerError("Failed to create new dealer: %v", err)
+						result, err := app.DB().Insert("dealers", params).Execute()
+						if err != nil || result == nil {
+							return apis.NewInternalServerError("Failed to create dealer: %v", err)
 						}
 					}
 				} else {
@@ -193,6 +202,15 @@ func main() {
 					if updated == 0 {
 						return apis.NewInternalServerError("Failed to create TAC for user: %v", err)
 					}
+				}
+			} else if httpCode == 500 {
+				if message, exists := response["message"]; exists {
+					err := errors.New(fmt.Sprint(message))
+					return apis.NewInternalServerError(err.Error(), err)
+				} else if err != nil {
+					return apis.NewInternalServerError(err.Error(), err)
+				} else {
+					return apis.NewInternalServerError("ngantuk", err)
 				}
 			}
 
@@ -238,13 +256,13 @@ func defaultPublicDir() string {
 }
 
 // postAPI makes a POST request to the specified URL with a JSON payload and returns the response body as a string.
-func sendTAC(payload map[string]interface{}) (map[string]interface{}, error) {
+func sendTAC(payload map[string]interface{}) (map[string]interface{}, int, error) {
 	url := "https://rest.onexox.my/sendTAC"
 
 	// Marshal the payload to JSON
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal JSON: %w", err)
+		return nil, 500, fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
 	// Create a new HTTP client
@@ -253,7 +271,7 @@ func sendTAC(payload map[string]interface{}) (map[string]interface{}, error) {
 	// Create a new HTTP POST request
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, 500, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// Set headers for the request
@@ -263,27 +281,22 @@ func sendTAC(payload map[string]interface{}) (map[string]interface{}, error) {
 	// Perform the HTTP request
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, 500, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	// Check for non-200 status codes
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("received non-200 status code: %d", resp.StatusCode)
-	}
 
 	// Read the response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, 500, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	// Unmarshal the response JSON into a map
 	var responseMap map[string]interface{}
 	err = json.Unmarshal(body, &responseMap)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response JSON: %w", err)
+		return nil, 500, fmt.Errorf("failed to unmarshal response JSON: %w", err)
 	}
 
-	return responseMap, nil
+	return responseMap, resp.StatusCode, nil
 }
