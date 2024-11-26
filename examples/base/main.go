@@ -148,6 +148,7 @@ func main() {
 			if response["code"] == 404 {
 				if record != nil { // no longer a subscriber
 					app.DB().Update("users", dbx.Params{"status": "Terminated"}, dbx.HashExp{"id": record.Id}).Execute()
+					app.DB().Update("dealers", dbx.Params{"status": "Terminated"}, dbx.HashExp{"id": record.Id}).Execute()
 				}
 				return apis.NewBadRequestError("Invalid phone number", err)
 			} else if response["code"] == 200 {
@@ -162,20 +163,34 @@ func main() {
 						"phone":           data.Phone,
 						"tac":             tac,
 					}
-					if dealer, exists := response["dealer"]; exists {
-						params["dealer"] = dealer
+					result, err := app.DB().Insert("users", params).Execute()
+					if err != nil || result == nil {
+						return apis.NewInternalServerError("Failed to create new user: %v", err)
 					}
-					app.DB().Insert("users", params).Execute()
-					app.DB().Insert("dealers", params).Execute()
+
+					if dealer, exists := response["dealer"]; exists {
+						newId, _ := result.LastInsertId()
+						params = dbx.Params{
+							"id":     newId,
+							"dealer": dealer,
+						}
+						_, err := app.DB().Insert("dealers", params).Execute()
+						if err != nil {
+							return apis.NewInternalServerError("Failed to create new dealer: %v", err)
+						}
+					}
 				} else {
 					params := dbx.Params{
 						"tac": tac,
 					}
-					if dealer, exists := response["dealer"]; exists {
-						params["dealer"] = dealer
+					result, err := app.DB().Update("users", params, dbx.HashExp{"id": record.Id}).Execute()
+					if err != nil || result == nil {
+						return apis.NewInternalServerError("Failed to create TAC: %v", err)
 					}
-					app.DB().Update("users", params, dbx.HashExp{"id": record.Id}).Execute()
-					app.DB().Update("dealers", params, dbx.HashExp{"id": record.Id}).Execute()
+					updated, err := result.RowsAffected()
+					if updated == 0 {
+						return apis.NewInternalServerError("Failed to create TAC for user: %v", err)
+					}
 				}
 			}
 
