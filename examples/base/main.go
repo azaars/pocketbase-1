@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -131,7 +133,7 @@ func main() {
 				return apis.NewBadRequestError("Failed to read request data", err)
 			}
 			record, err := app.FindFirstRecordByData("users", "phone", data.Phone)
-			if err != nil {
+			if err != nil && errors.Is(err, sql.ErrNoRows) {
 				return apis.NewBadRequestError("Invalid phone number", err)
 			}
 
