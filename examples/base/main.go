@@ -21,7 +21,6 @@ import (
 	"github.com/pocketbase/pocketbase/plugins/jsvm"
 	"github.com/pocketbase/pocketbase/plugins/migratecmd"
 	"github.com/pocketbase/pocketbase/tools/hook"
-	"github.com/pocketbase/pocketbase/tools/security"
 )
 
 func main() {
@@ -137,10 +136,14 @@ func main() {
 				return apis.NewBadRequestError("Invalid phone number", err)
 			}
 
-			tac := security.RandomStringWithAlphabet(6, "1234567890")
 			payload := map[string]interface{}{
 				"msisdn": data.Phone,
-				"tac":    tac,
+				"lang":   "en",
+			}
+			if record == nil {
+				payload["id"] = nil
+			} else {
+				payload["id"] = record.Id
 			}
 			response, httpCode, err := sendTAC(payload)
 			if err != nil {
@@ -155,65 +158,44 @@ func main() {
 				return apis.NewBadRequestError("Invalid phone number", err)
 			} else if httpCode == 200 {
 				if record == nil {
-					password := security.RandomString(30)
-					token, tokenErr := record.NewAuthToken()
-					if tokenErr != nil {
-						return apis.NewInternalServerError("Failed to create auth token.", tokenErr)
-					}
-					params := dbx.Params{
-						"password":        password,
-						"emailVisibility": true,
-						"verified":        false,
-						"username":        data.Phone,
-						"phone":           data.Phone,
-						"tac":             tac,
-						"tokenKey":        token,
-					}
-					_, err := app.DB().Insert("users", params).Execute()
+					record, err = app.FindFirstRecordByData("users", "phone", data.Phone)
 					if err != nil {
-						return apis.NewInternalServerError("Failed to create new user", err)
-						// return apis.NewInternalServerError(err.Error(), err)
+						return apis.NewInternalServerError("Faild to create user: "+err.Error(), err)
 					}
-
-					if dealer, exists := response["dealer"]; exists {
-						record, err := app.FindFirstRecordByData("users", "phone", data.Phone)
+				}
+				_, err = app.DB().Update("users", dbx.Params{"tac": response["tac"]}, dbx.HashExp{"id": record.Id}).Execute()
+				if err != nil {
+					return apis.NewInternalServerError("Failed to create TAC: "+err.Error(), err)
+				}
+				if dealer, exists := response["dealer"]; exists {
+					var user struct {
+						ID, UserId string
+					}
+					err = app.DB().Select("id, userid").From("dealers").Where(dbx.HashExp{"dealer": dealer}).One(&user)
+					if err == nil || user.UserId != record.Id {
 						if err != nil {
-							return apis.NewInternalServerError("Failed to create dealer: %v", err)
+							app.DB().Delete("dealers", dbx.HashExp{"id": user.ID})
 						}
-
 						params := dbx.Params{
 							"userid": record.Id,
 							"dealer": dealer,
 						}
-						result, err := app.DB().Insert("dealers", params).Execute()
-						if err != nil || result == nil {
-							return apis.NewInternalServerError("Failed to create dealer: %v", err)
+						_, err = app.DB().Insert("dealers", params).Execute()
+						if err != nil {
+							return apis.NewInternalServerError("Failed to create dealer: "+err.Error(), err)
 						}
 					}
 				} else {
-					params := dbx.Params{
-						"tac": tac,
-					}
-					result, err := app.DB().Update("users", params, dbx.HashExp{"id": record.Id}).Execute()
-					if err != nil || result == nil {
-						return apis.NewInternalServerError("Failed to create TAC: %v", err)
-					}
-					updated, err := result.RowsAffected()
-					if updated == 0 {
-						return apis.NewInternalServerError("Failed to create TAC for user: %v", err)
-					}
+					app.DB().Delete("dealers", dbx.HashExp{"userid": record.Id})
 				}
-			} else if httpCode == 500 {
+			} else {
 				if message, exists := response["message"]; exists {
 					err := errors.New(fmt.Sprint(message))
 					return apis.NewInternalServerError(err.Error(), err)
-				} else if err != nil {
-					return apis.NewInternalServerError(err.Error(), err)
 				} else {
-					return apis.NewInternalServerError("ngantuk", err)
+					return apis.NewInternalServerError("Failed to send TAC: "+err.Error(), err)
 				}
 			}
-
 			return nil
 		})
 
@@ -299,4 +281,9 @@ func sendTAC(payload map[string]interface{}) (map[string]interface{}, int, error
 	}
 
 	return responseMap, resp.StatusCode, nil
+}
+
+type User struct {
+	ID     string
+	Dealer string
 }
