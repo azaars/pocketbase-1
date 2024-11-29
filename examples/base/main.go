@@ -126,7 +126,8 @@ func main() {
 	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
 		se.Router.POST("/api/collections/users/send-tac", func(re *core.RequestEvent) error {
 			data := struct {
-				Phone string `json:"phone" form:"phone"`
+				Phone    string `json:"phone" form:"phone"`
+				Language string `json:"lang" form:"lang"`
 			}{}
 			if err := re.BindBody(&data); err != nil {
 				return apis.NewBadRequestError("Failed to read request data", err)
@@ -138,7 +139,7 @@ func main() {
 
 			payload := map[string]interface{}{
 				"msisdn": data.Phone,
-				"lang":   "en",
+				"lang":   data.Language,
 			}
 			if record == nil {
 				payload["id"] = nil
@@ -147,13 +148,13 @@ func main() {
 			}
 			response, httpCode, err := sendTAC(payload)
 			if err != nil {
-				return apis.NewInternalServerError(err.Error(), err)
+				return apis.NewApiError(500, err.Error(), err)
 			}
 
 			if httpCode == 404 {
 				if record != nil { // no longer a subscriber
 					app.DB().Update("users", dbx.Params{"status": "Terminated"}, dbx.HashExp{"id": record.Id}).Execute()
-					app.DB().Update("dealers", dbx.Params{"status": "Terminated"}, dbx.HashExp{"id": record.Id}).Execute()
+					app.DB().Update("dealers", dbx.Params{"status": "Terminated"}, dbx.HashExp{"userId": record.Id}).Execute()
 				}
 				return apis.NewBadRequestError("Invalid phone number", err)
 			} else if httpCode == 200 {
@@ -165,35 +166,35 @@ func main() {
 				}
 				_, err = app.DB().Update("users", dbx.Params{"tac": response["tac"]}, dbx.HashExp{"id": record.Id}).Execute()
 				if err != nil {
-					return apis.NewInternalServerError("Failed to create TAC: "+err.Error(), err)
+					return apis.NewApiError(500, "Failed to create TAC: "+err.Error(), err)
 				}
 				if dealer, exists := response["dealer"]; exists {
 					var user struct {
 						ID, UserId string
 					}
-					err = app.DB().Select("id, userid").From("dealers").Where(dbx.HashExp{"dealer": dealer}).One(&user)
+					err = app.DB().Select("id, userId").From("dealers").Where(dbx.HashExp{"dealer": dealer}).One(&user)
 					if err == nil || user.UserId != record.Id {
 						if err != nil {
-							app.DB().Delete("dealers", dbx.HashExp{"id": user.ID})
+							app.DB().Delete("dealers", dbx.HashExp{"userId": user.ID}).Execute()
 						}
 						params := dbx.Params{
-							"userid": record.Id,
+							"userId": record.Id,
 							"dealer": dealer,
 						}
 						_, err = app.DB().Insert("dealers", params).Execute()
 						if err != nil {
-							return apis.NewInternalServerError("Failed to create dealer: "+err.Error(), err)
+							return apis.NewApiError(500, "Failed to create dealer: "+err.Error(), err)
 						}
 					}
 				} else {
-					app.DB().Delete("dealers", dbx.HashExp{"userid": record.Id})
+					app.DB().Delete("dealers", dbx.HashExp{"userId": record.Id}).Execute()
 				}
 			} else {
 				if message, exists := response["message"]; exists {
 					err := errors.New(fmt.Sprint(message))
-					return apis.NewInternalServerError(err.Error(), err)
+					return apis.NewApiError(500, err.Error(), err)
 				} else {
-					return apis.NewInternalServerError("Failed to send TAC: "+err.Error(), err)
+					return apis.NewApiError(500, "Failed to send TAC:", err)
 				}
 			}
 			return nil
@@ -205,14 +206,14 @@ func main() {
 	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
 		se.Router.POST("/api/collections/users/phone-login", func(re *core.RequestEvent) error {
 			data := struct {
-				Phone    string `json:"phone" form:"phone"`
-				Password string `json:"password" form:"password"`
+				Phone string `json:"phone" form:"phone"`
+				TAC   string `json:"tac" form:"tac"`
 			}{}
 			if err := re.BindBody(&data); err != nil {
 				return apis.NewBadRequestError("Failed to read request data", err)
 			}
 			record, err := app.FindFirstRecordByData("users", "phone", data.Phone)
-			if err != nil || !record.ValidatePassword(data.Password) {
+			if err != nil || strings.Compare(data.TAC, record.GetString("tac")) != 0 {
 				return apis.NewBadRequestError("Invalid credentials", err)
 			}
 
@@ -281,9 +282,4 @@ func sendTAC(payload map[string]interface{}) (map[string]interface{}, int, error
 	}
 
 	return responseMap, resp.StatusCode, nil
-}
-
-type User struct {
-	ID     string
-	Dealer string
 }
